@@ -6,7 +6,8 @@ DevDigest is a streaming chat application built on the [Vercel AI SDK](https://s
 with a locally hosted LLM served by [Ollama](https://ollama.com). The model can
 call tools (weather, product search/insert, product-for-city) and answer
 questions from a small document corpus using retrieval-augmented generation
-(RAG).
+(RAG). Model, tool, and RAG calls are traced with OpenTelemetry and shipped to
+[Langfuse](https://langfuse.com) for latency/token/prompt dashboards.
 
 See [`DECISIONS.md`](./DECISIONS.md) for the reasoning and trade-offs behind the
 main technical choices.
@@ -22,6 +23,15 @@ Browser (app/Chat) ──> POST /api/chat ──> streamText(model, tools)
                                               SQLite (better-sqlite3) <── embeddings table
 ```
 
+Every `streamText` call and the `retrieve-context` step become Langfuse
+observations (`instrumentation.ts` → `LangfuseSpanProcessor`), exported over
+OpenTelemetry:
+
+```
+streamText (generation + tool obs) / retrieve-context (retriever obs)
+    ──> LangfuseSpanProcessor ──> Langfuse UI
+```
+
 - **`app/api/chat/route.ts`** — the chat endpoint. Streams the model response
   and exposes the tool set.
 - **`app/tools/*`** — tools. Each tool's logic is an exported, dependency-injected
@@ -33,7 +43,12 @@ Browser (app/Chat) ──> POST /api/chat ──> streamText(model, tools)
 - **`lib/chunk.ts`** — pure text chunker (paragraph-packing + overlap).
 - **`lib/retrieval.ts`** — pure cosine similarity + ranking with top-K and a
   character budget (context-limit handling), plus `retrieve()` that ties it to
-  the DB and embedder.
+  the DB and embedder, wrapped in a Langfuse `retrieve-context` **retriever**
+  observation (input = query, output = retrieved chunks).
+- **`instrumentation.ts` / `instrumentation.node.ts`** — OpenTelemetry
+  bootstrap. `register()` runs once per server start and (on the Node.js
+  runtime only) wires the `LangfuseSpanProcessor` and the AI SDK telemetry
+  integration.
 - **`scripts/ingest.ts`** — offline ingestion: chunk → embed → store.
 - **`corpus/*.md`** — the RAG knowledge base.
 
@@ -46,7 +61,8 @@ Browser (app/Chat) ──> POST /api/chat ──> streamText(model, tools)
   ollama pull nomic-embed-text     # embedding model (768-dim)
   ```
 
-- Node.js 20+.
+- Node.js 20+ (Node.js 22+ required for the Langfuse Vercel AI SDK telemetry
+  integration used in `instrumentation.node.ts`).
 
 Install dependencies:
 
@@ -78,6 +94,51 @@ live model nor the real database file.
 npm test        # watch mode
 npm run test:run  # single run (CI-style)
 ```
+
+## Observability (Langfuse + OpenTelemetry)
+
+Model, tool, and RAG spans are exported to [Langfuse](https://langfuse.com) via
+OpenTelemetry. `instrumentation.ts` is called once per server start; on the
+Node.js runtime it starts an OTel `NodeSDK` with the `LangfuseSpanProcessor` and
+registers the AI SDK telemetry integration (`instrumentation.node.ts`). The chat
+route wraps `streamText` in `propagateAttributes(...)` so each conversation
+becomes a labelled trace (grouped by agent and model), and `retrieve()` emits a
+`rag.retrieve` span so RAG latency is separable from model latency.
+
+These spans let you build dashboards that answer: which model is fastest, which
+prompts cost the most (by tokens/latency — Ollama is free, so set custom
+per-model prices in Langfuse if you want a currency axis), and where latency is
+coming from (model vs. tool vs. RAG).
+
+### Configure
+
+Copy the example env file and fill in your Langfuse project keys:
+
+```bash
+cp .env.example .env
+```
+
+```bash
+LANGFUSE_PUBLIC_KEY="pk-lf-..."
+LANGFUSE_SECRET_KEY="sk-lf-..."
+LANGFUSE_BASE_URL="http://localhost:3001"   # self-hosted, or https://cloud.langfuse.com
+```
+
+### Self-host Langfuse (optional)
+
+To run Langfuse locally instead of using Langfuse Cloud, start the bundled
+stack (Langfuse v4 web + worker, Postgres, ClickHouse, Redis, MinIO). The UI is
+published on port `3001` so it does not clash with `next dev` on `3000`:
+
+```bash
+docker compose -f docker-compose.langfuse.yml up -d
+```
+
+Open [http://localhost:3001](http://localhost:3001), click **Sign up** to create
+the first user, then create a project and copy its public/secret keys into
+`.env`. Replace every `# CHANGEME` secret in the compose file before exposing it
+beyond localhost. The compose file pins the **v4** backend, which matches the
+OpenTelemetry-based `@langfuse/*` JS SDK this project uses.
 
 ## Getting Started
 

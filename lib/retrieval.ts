@@ -8,6 +8,7 @@
 
 import type { Database } from 'better-sqlite3';
 import { embedText, EMBEDDING_DIM } from '@/lib/embeddings';
+import { startActiveObservation } from '@langfuse/tracing';
 
 /**
  * Cosine similarity of two equal-length vectors.
@@ -113,19 +114,50 @@ export async function retrieve(
   options: RetrieveOptions = {},
   fetchFn: typeof fetch = fetch,
 ): Promise<RetrievedChunk[]> {
-  const queryVector = await embedText(query, fetchFn);
+  // Trace retrieval as a Langfuse `retriever`-typed observation (not a generic
+  // span) so it is correctly classified in the trace tree and Agent Graph, and
+  // RAG latency is separable from the model/tool spans. Per Langfuse
+  // best-practices, the observation carries meaningful input (the query) and
+  // output (the retrieved chunks), with run-specific counts in metadata.
+  //
+  // When no Langfuse/OTel SDK is registered (e.g. unit tests), the tracing API
+  // is a no-op, so this adds no behavioural change — the observation simply
+  // isn't exported.
+  return startActiveObservation(
+    'retrieve-context',
+    async (retriever) => {
+      const { topK = RETRIEVE_DEFAULTS.topK } = options;
+      retriever.update({ input: query });
 
-  if (queryVector.length !== EMBEDDING_DIM) {
-    throw new Error(
-      `Query embedding dimension ${queryVector.length} != expected ${EMBEDDING_DIM}`,
-    );
-  }
+      const queryVector = await embedText(query, fetchFn);
 
-  const candidates = db
-    .prepare(
-      `SELECT id, source, chunk_index, chunk_text, vector, dim FROM embeddings`,
-    )
-    .all() as StoredEmbedding[];
+      if (queryVector.length !== EMBEDDING_DIM) {
+        throw new Error(
+          `Query embedding dimension ${queryVector.length} != expected ${EMBEDDING_DIM}`,
+        );
+      }
 
-  return rankByCosine(queryVector, candidates, options);
+      const candidates = db
+        .prepare(
+          `SELECT id, source, chunk_index, chunk_text, vector, dim FROM embeddings`,
+        )
+        .all() as StoredEmbedding[];
+
+      const results = rankByCosine(queryVector, candidates, options);
+
+      retriever.update({
+        // Output: what the retriever returned — source + score per chunk,
+        // readable at a glance in the UI (full text stays in the tool result).
+        output: results.map((c) => ({ source: c.source, score: c.score })),
+        metadata: {
+          topK,
+          candidateCount: candidates.length,
+          resultCount: results.length,
+        },
+      });
+
+      return results;
+    },
+    { asType: 'retriever' },
+  );
 }

@@ -101,7 +101,7 @@ export default function Conversation({
     e.preventDefault();
     if ((!input.trim() && !files) || isStreaming) return;
 
-    sendMessage({ text: input, files }, { body: { agentId } });
+    sendMessage({ text: input, files }, { body: { agentId, sessionId } });
 
     setInput('');
     setFiles(undefined);
