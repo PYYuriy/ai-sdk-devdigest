@@ -1,4 +1,3 @@
-// app/api/agents/route.ts
 import { AGENTS } from "@/app/agents";
 
 export function GET() {
