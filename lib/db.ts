@@ -60,6 +60,30 @@ if (!columnNames.has('max_temp')) {
   db.exec(`ALTER TABLE products ADD COLUMN max_temp REAL`);
 }
 
+// Embeddings table for RAG (Phase 2).
+// - `source`      : which document the chunk came from (e.g. file name).
+// - `chunk_index` : position of the chunk within its source (0-based).
+// - `chunk_text`  : the raw text that was embedded (returned as context).
+// - `vector`      : the embedding as a JSON array of floats. JSON (not BLOB)
+//                   keeps the store portable and trivially inspectable for a
+//                   small corpus; cosine similarity is computed in JS.
+// - `dim`         : vector dimension, stored so retrieval can sanity-check
+//                   that the query embedding matches stored vectors.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS embeddings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    chunk_text TEXT NOT NULL,
+    vector TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+// Index to make per-source deletion (idempotent re-ingestion) fast.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_embeddings_source ON embeddings(source)`);
+
 export function checkpoint() {
   db.pragma('wal_checkpoint(TRUNCATE)');
 }
