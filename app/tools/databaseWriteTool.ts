@@ -1,6 +1,58 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import db from '@/lib/db';
+import type { Database } from 'better-sqlite3';
+import defaultDb from '@/lib/db';
+
+export type AddProductArgs = {
+  name: string;
+  country: string;
+  price: number;
+  size: string;
+  amount: number;
+  minTemp?: number;
+  maxTemp?: number;
+};
+
+export type AddProductResult =
+  | {
+      success: true;
+      id: number;
+      product: AddProductArgs;
+      message: string;
+    }
+  | {
+      success: false;
+      error: string;
+    };
+
+/**
+ * Insert logic with the database injected. Extracted from the tool so it can
+ * be unit-tested against an in-memory DB. Optional temps default to NULL.
+ */
+export function addProduct(db: Database, args: AddProductArgs): AddProductResult {
+  const { name, country, price, size, amount, minTemp, maxTemp } = args;
+  try {
+    const result = db
+      .prepare(
+        `INSERT INTO products (name, country, price, size, amount, min_temp, max_temp)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(name, country, price, size, amount, minTemp ?? null, maxTemp ?? null);
+
+    return {
+      success: true,
+      id: Number(result.lastInsertRowid),
+      product: args,
+      message: `Added "${name}" (${amount} × ${size}) from ${country} at ${price}.`,
+    };
+  } catch (err) {
+    console.error('addProduct insert failed', err);
+    return {
+      success: false,
+      error: 'Failed to save the product to the database.',
+    };
+  }
+}
 
 export const addProductTool = tool({
   description:
@@ -27,37 +79,5 @@ export const addProductTool = tool({
       .optional()
       .describe('Highest suitable temperature in °C (optional)'),
   }),
-  execute: async ({ name, country, price, size, amount, minTemp, maxTemp }) => {
-    console.log('[addProductTool] execute called with', {
-      name,
-      country,
-      price,
-      size,
-      amount,
-      minTemp,
-      maxTemp,
-    });
-    try {
-      const result = db
-        .prepare(
-          `INSERT INTO products (name, country, price, size, amount, min_temp, max_temp)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(name, country, price, size, amount, minTemp ?? null, maxTemp ?? null);
-
-      console.log('[addProductTool] inserted id', Number(result.lastInsertRowid));
-      return {
-        success: true,
-        id: Number(result.lastInsertRowid),
-        product: { name, country, price, size, amount, minTemp, maxTemp },
-        message: `Added "${name}" (${amount} × ${size}) from ${country} at ${price}.`,
-      };
-    } catch (err) {
-      console.error('addProductTool insert failed', err);
-      return {
-        success: false,
-        error: 'Failed to save the product to the database.',
-      };
-    }
-  },
+  execute: async (args) => addProduct(defaultDb, args),
 });

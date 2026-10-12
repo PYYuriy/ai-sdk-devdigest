@@ -1,6 +1,64 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import db from '@/lib/db';
+import type { Database } from 'better-sqlite3';
+import defaultDb from '@/lib/db';
+
+// Input shape shared by the schema and the pure logic function.
+export type SearchProductsArgs = {
+  query?: string;
+  country?: string;
+  maxResults: number;
+  sortBy: 'newest' | 'price' | 'name';
+};
+
+export type SearchProductsResult = {
+  resultsCount: number;
+  products: unknown[];
+};
+
+// Allowlist of sort options -> safe column clauses.
+// Keeping this as an exported constant lets tests assert the mapping directly
+// and guarantees no user-supplied string reaches the SQL ORDER BY clause.
+export const SORT_COLUMNS: Record<SearchProductsArgs['sortBy'], string> = {
+  price: 'price ASC',
+  name: 'name ASC',
+  newest: 'id DESC',
+};
+
+/**
+ * Search logic with the database injected. Extracted from the tool so it can
+ * be unit-tested against an in-memory DB without the AI SDK or the real file.
+ */
+export function searchProducts(
+  db: Database,
+  { query, country, maxResults, sortBy }: SearchProductsArgs,
+): SearchProductsResult {
+  const orderBy = SORT_COLUMNS[sortBy] ?? SORT_COLUMNS.newest;
+
+  // Parameterised query. With no filters this returns all rows.
+  let sql = 'SELECT id, name, country, price, size, amount FROM products WHERE 1=1';
+  const params: (string | number)[] = [];
+
+  if (query && query.trim()) {
+    sql += ' AND name LIKE ?';
+    params.push(`%${query.trim()}%`);
+  }
+
+  if (country && country.trim()) {
+    sql += ' AND country = ?';
+    params.push(country.trim());
+  }
+
+  sql += ` ORDER BY ${orderBy} LIMIT ?`;
+  params.push(maxResults);
+
+  const products = db.prepare(sql).all(...params);
+
+  return {
+    resultsCount: products.length,
+    products,
+  };
+}
 
 export const searchProductsTool = tool({
   description:
@@ -25,37 +83,5 @@ export const searchProductsTool = tool({
       .default('newest')
       .describe('Sort order for results'),
   }),
-  execute: async ({ query, country, maxResults, sortBy }) => {
-    // Map sort option to a safe column clause (prevents SQL injection).
-    const sortColumns: Record<string, string> = {
-      price: 'price ASC',
-      name: 'name ASC',
-      newest: 'id DESC',
-    };
-    const orderBy = sortColumns[sortBy] ?? 'id DESC';
-
-    // Build a parameterized query. With no filters this returns all rows.
-    let sql = 'SELECT id, name, country, price, size, amount FROM products WHERE 1=1';
-    const params: (string | number)[] = [];
-
-    if (query && query.trim()) {
-      sql += ' AND name LIKE ?';
-      params.push(`%${query.trim()}%`);
-    }
-
-    if (country && country.trim()) {
-      sql += ' AND country = ?';
-      params.push(country.trim());
-    }
-
-    sql += ` ORDER BY ${orderBy} LIMIT ?`;
-    params.push(maxResults);
-
-    const products = db.prepare(sql).all(...params);
-
-    return {
-      resultsCount: products.length,
-      products,
-    };
-  },
+  execute: async (args) => searchProducts(defaultDb, args),
 });
