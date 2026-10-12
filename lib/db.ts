@@ -15,6 +15,9 @@ const db = new Database(dbPath);
 // Enable WAL mode for better concurrency performance
 db.pragma('journal_mode = WAL');
 
+// Enforce foreign keys so chat_messages are cascade-deleted with their session.
+db.pragma('foreign_keys = ON');
+
 // Initial setup: create a sample table if it doesn't exist
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -83,6 +86,42 @@ db.exec(`
 
 // Index to make per-source deletion (idempotent re-ingestion) fast.
 db.exec(`CREATE INDEX IF NOT EXISTS idx_embeddings_source ON embeddings(source)`);
+
+// Chat history: a session groups a conversation; messages belong to a session.
+// - `title`      : human-friendly label shown in the sidebar (derived from the
+//                  first user message, or "New chat" until one is sent).
+// - `agent_id`   : the agent profile the session was last using (optional).
+// Timestamps are ISO-ish strings via SQLite's datetime('now') for easy sorting.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_sessions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT 'New chat',
+    agent_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+// Messages are stored as the raw AI SDK UIMessage JSON. The `parts` array of a
+// UIMessage has a flexible shape (text, file, tool calls…), so persisting the
+// whole message as JSON avoids a brittle relational mapping. `position` keeps
+// the original ordering stable regardless of insertion timing.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+  )
+`);
+
+// Fast lookup/ordering of a session's messages.
+db.exec(
+  `CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, position)`,
+);
 
 export function checkpoint() {
   db.pragma('wal_checkpoint(TRUNCATE)');
